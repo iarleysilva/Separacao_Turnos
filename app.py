@@ -44,42 +44,54 @@ def carregar_todo_o_sistema():
         "LASTRAS": "https://docs.google.com/spreadsheets/d/e/2PACX-1vTS8d44ajH4_Hm7uaAWVbejIzmbMqK8fCbYEPYWddDc4pnbFBhyOye4vs6QmtJ-a51V-b9HDTFPDcSw/pub?gid=1675809741&single=true&output=csv"
     }
     
-    # CARREGAR TURNOS (SOMA TUDO)
+    # CARREGAR TURNOS
     dfs_lista = []
     for t in ["TURNO 1", "TURNO 2", "TURNO 3"]:
         df_t = carregar_dados_aba(links[t], t)
         if not df_t.empty:
             c_data = next((c for c in df_t.columns if "DATA" in c), df_t.columns[0])
             df_t['DATA_LIMPA'] = pd.to_datetime(df_t[c_data], dayfirst=True, errors='coerce')
-            df_t['NOME_TURNO'] = t
+            df_t['NOME_TURNO_REF'] = t
+            
             c_per = next((c for c in df_t.columns if "PERCURSO" in c), None)
             if c_per:
                 df_t['PERCURSO_TXT'] = df_t[c_per].astype(str).str.split('.').str[0].str.strip()
+            
+            # Número do turno limpo (1, 2 ou 3)
+            df_t['TURNO_NUM'] = t.split(" ")[-1].strip()
+            
             c_mi = next((c for c in df_t.columns if "MI" in c and "TOTAL" in c), None)
             c_me = next((c for c in df_t.columns if "ME" in c and "TOTAL" in c), None)
             df_t['MI_VAL'] = pd.to_numeric(df_t[c_mi], errors='coerce').fillna(0) if c_mi else 0
             df_t['ME_VAL'] = pd.to_numeric(df_t[c_me], errors='coerce').fillna(0) if c_me else 0
+            
             c_gat = next((c for c in df_t.columns if "LASTRA" in c and "ACESSOS" in c), None)
             df_t['GATILHO'] = pd.to_numeric(df_t[c_gat], errors='coerce').fillna(0) if c_gat else 0
+            
             dfs_lista.append(df_t.dropna(subset=['DATA_LIMPA']))
     
     df_full = pd.concat(dfs_lista, ignore_index=True) if dfs_lista else pd.DataFrame()
     
-    # CARREGAR LASTRAS (REGRA DA ÚLTIMA LINHA)
+    # CARREGAR LASTRAS
     df_l = pd.DataFrame()
     try:
         df_l = pd.read_csv(links["LASTRAS"], skiprows=range(1, 22413))
         df_l.columns = [str(c).strip().upper() for c in df_l.columns]
+        
         c_per_l = 'PERCURSO / ITEM' if 'PERCURSO / ITEM' in df_l.columns else df_l.columns[3]
         df_l['PERCURSO_CHAVE'] = df_l[c_per_l].astype(str).str.split('.').str[0].str.strip()
         
-        # --- O AJUSTE MESTRE ---
-        # Mantém apenas a última ocorrência do percurso na aba técnica
-        df_l = df_l.drop_duplicates(subset=['PERCURSO_CHAVE'], keep='last')
+        # Trata coluna TURNO na técnica (limpa espaços e vira texto)
+        if 'TURNO' in df_l.columns:
+            df_l['TURNO_CHAVE'] = df_l['TURNO'].astype(str).str.split('.').str[0].str.strip()
+        
+        # Remove apenas duplicatas perfeitas (mesmo percurso, turno e quantidade)
+        df_l = df_l.drop_duplicates(subset=['PERCURSO_CHAVE', 'PC', 'TURNO_CHAVE'], keep='last')
         
         for f in ['120X270', '160 X 160', 'PC']:
             if f in df_l.columns:
                 df_l[f] = pd.to_numeric(df_l[f], errors='coerce').fillna(0)
+                
     except Exception as e:
         st.error(f"Erro na aba LASTRAS: {e}")
         
@@ -87,15 +99,15 @@ def carregar_todo_o_sistema():
 
 df_geral, df_tec = carregar_todo_o_sistema()
 
-# --- SIDEBAR E ABAS (MANTIDOS IGUAL AO SUCESSO ANTERIOR) ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Painel de Controle")
     if not df_geral.empty:
         df_geral['MES_ANO'] = df_geral['DATA_LIMPA'].dt.strftime('%m/%Y')
         mes_sel = st.selectbox("Mês de Análise", sorted(df_geral['MES_ANO'].unique(), reverse=True))
-        turnos_ok = sorted(df_geral['NOME_TURNO'].unique())
+        turnos_ok = sorted(df_geral['NOME_TURNO_REF'].unique())
         turnos_sel = st.multiselect("Filtro de Turnos", turnos_ok, default=turnos_ok)
-        df_f = df_geral[(df_geral['MES_ANO'] == mes_sel) & (df_geral['NOME_TURNO'].isin(turnos_sel))]
+        df_f = df_geral[(df_geral['MES_ANO'] == mes_sel) & (df_geral['NOME_TURNO_REF'].isin(turnos_sel))]
     else:
         st.stop()
 
@@ -123,13 +135,30 @@ with tab1:
 with tab2:
     df_gat = df_f[df_f['GATILHO'] > 0].copy()
     if df_gat.empty:
-        st.info("Nenhuma operação de Lastra detectada nesta seleção.")
+        st.info("Nenhuma operação de Lastra detectada.")
     else:
-        df_res = pd.merge(df_gat, df_tec, left_on='PERCURSO_TXT', right_on='PERCURSO_CHAVE', how='inner')
+        # 1. TENTATIVA DE MERGE POR PERCURSO + TURNO (JUSTIÇA)
+        df_res = pd.merge(
+            df_gat, 
+            df_tec, 
+            left_on=['PERCURSO_TXT', 'TURNO_NUM'], 
+            right_on=['PERCURSO_CHAVE', 'TURNO_CHAVE'], 
+            how='inner'
+        )
+
+        # 2. SE FALHAR (EQUIPE NÃO PREENCHEU O TURNO NA TÉCNICA), TENTA APENAS PELO PERCURSO (GARANTIA)
+        if df_res.empty:
+            df_res = pd.merge(
+                df_gat, 
+                df_tec.drop_duplicates('PERCURSO_CHAVE', keep='last'), 
+                left_on='PERCURSO_TXT', 
+                right_on='PERCURSO_CHAVE', 
+                how='inner'
+            )
+        
         if not df_res.empty:
             d_l = df_res['DATA_LIMPA'].dt.date.nunique()
             st.markdown(f"### 📦 Performance Técnica: Lastras ({mes_sel})")
-            st.info(f"📅 Registro de Operação: {d_l} dias com movimentação de Lastras.")
             
             df_caix = df_res[df_res['TIPO DE OPERAÇÃO'].fillna('').str.upper().str.contains('CAIXOTE')]
             df_unit = df_res[df_res['TIPO DE OPERAÇÃO'].fillna('').str.upper().str.contains('UNITIZAR')]
@@ -161,3 +190,5 @@ with tab2:
             tabela_final = df_res.groupby('TIPO DE OPERAÇÃO').agg({'120X270': 'sum', '160 X 160': 'sum', 'PC': 'sum', 'GATILHO': 'sum'}).reset_index()
             tabela_final.rename(columns={'GATILHO': 'TOTAL ACESSOS'}, inplace=True)
             st.table(tabela_final.style.format({'120X270': '{:,.0f}', '160 X 160': '{:,.0f}', 'PC': '{:,.0f}', 'TOTAL ACESSOS': '{:,.0f}'}))
+        else:
+            st.warning("⚠️ Percursos não encontrados na aba LASTRAS. Verifique se os códigos de percurso estão corretos.")
