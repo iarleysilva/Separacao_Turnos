@@ -44,7 +44,6 @@ def carregar_todo_o_sistema():
         "LASTRAS": "https://docs.google.com/spreadsheets/d/e/2PACX-1vTS8d44ajH4_Hm7uaAWVbejIzmbMqK8fCbYEPYWddDc4pnbFBhyOye4vs6QmtJ-a51V-b9HDTFPDcSw/pub?gid=1675809741&single=true&output=csv"
     }
     
-    # CARREGAR TURNOS
     dfs_lista = []
     for t in ["TURNO 1", "TURNO 2", "TURNO 3"]:
         df_t = carregar_dados_aba(links[t], t)
@@ -57,7 +56,6 @@ def carregar_todo_o_sistema():
             if c_per:
                 df_t['PERCURSO_TXT'] = df_t[c_per].astype(str).str.split('.').str[0].str.strip()
             
-            # Número do turno limpo (1, 2 ou 3)
             df_t['TURNO_NUM'] = t.split(" ")[-1].strip()
             
             c_mi = next((c for c in df_t.columns if "MI" in c and "TOTAL" in c), None)
@@ -72,7 +70,6 @@ def carregar_todo_o_sistema():
     
     df_full = pd.concat(dfs_lista, ignore_index=True) if dfs_lista else pd.DataFrame()
     
-    # CARREGAR LASTRAS
     df_l = pd.DataFrame()
     try:
         df_l = pd.read_csv(links["LASTRAS"], skiprows=range(1, 22413))
@@ -81,11 +78,9 @@ def carregar_todo_o_sistema():
         c_per_l = 'PERCURSO / ITEM' if 'PERCURSO / ITEM' in df_l.columns else df_l.columns[3]
         df_l['PERCURSO_CHAVE'] = df_l[c_per_l].astype(str).str.split('.').str[0].str.strip()
         
-        # Trata coluna TURNO na técnica (limpa espaços e vira texto)
         if 'TURNO' in df_l.columns:
             df_l['TURNO_CHAVE'] = df_l['TURNO'].astype(str).str.split('.').str[0].str.strip()
         
-        # Remove apenas duplicatas perfeitas (mesmo percurso, turno e quantidade)
         df_l = df_l.drop_duplicates(subset=['PERCURSO_CHAVE', 'PC', 'TURNO_CHAVE'], keep='last')
         
         for f in ['120X270', '160 X 160', 'PC']:
@@ -116,16 +111,16 @@ tab1, tab2 = st.tabs(["🚀 Produção Geral", "📦 Detalhamento Lastras"])
 with tab1:
     st.subheader(f"Resumo Operacional - {mes_sel}")
     mi, me = df_f['MI_VAL'].sum(), df_f['ME_VAL'].sum()
-    dias = df_f['DATA_LIMPA'].dt.date.nunique()
+    dias_totais = df_f['DATA_LIMPA'].dt.date.nunique()
     c1, c2, c3 = st.columns(3)
     c1.metric("Total MI", f"{int(mi):,}".replace(',', '.'))
     c2.metric("Total ME", f"{int(me):,}".replace(',', '.'))
     c3.metric("Geral (MI+ME)", f"{int(mi+me):,}".replace(',', '.'))
-    if dias > 0:
+    if dias_totais > 0:
         c4, c5, c6 = st.columns(3)
-        c4.metric("Dias com Registro", dias)
-        c5.metric("Média MI/Dia", f"{(mi/dias):.1f}".replace('.', ','))
-        c6.metric("Média ME/Dia", f"{(me/dias):.1f}".replace('.', ','))
+        c4.metric("Dias com Registro", dias_totais)
+        c5.metric("Média MI/Dia", f"{(mi/dias_totais):.1f}".replace('.', ','))
+        c6.metric("Média ME/Dia", f"{(me/dias_totais):.1f}".replace('.', ','))
     st.divider()
     evol = df_f.groupby(df_f['DATA_LIMPA'].dt.date)[['MI_VAL', 'ME_VAL']].sum().reset_index()
     fig = px.line(evol, x='DATA_LIMPA', y=['MI_VAL', 'ME_VAL'], markers=True, text='value', title="Acessos Totais por Dia")
@@ -137,29 +132,20 @@ with tab2:
     if df_gat.empty:
         st.info("Nenhuma operação de Lastra detectada.")
     else:
-        # 1. TENTATIVA DE MERGE POR PERCURSO + TURNO (JUSTIÇA)
-        df_res = pd.merge(
-            df_gat, 
-            df_tec, 
-            left_on=['PERCURSO_TXT', 'TURNO_NUM'], 
-            right_on=['PERCURSO_CHAVE', 'TURNO_CHAVE'], 
-            how='inner'
-        )
-
-        # 2. SE FALHAR (EQUIPE NÃO PREENCHEU O TURNO NA TÉCNICA), TENTA APENAS PELO PERCURSO (GARANTIA)
+        # CRUZAMENTO COM LÓGICA DE RESGATE
+        df_res = pd.merge(df_gat, df_tec, left_on=['PERCURSO_TXT', 'TURNO_NUM'], right_on=['PERCURSO_CHAVE', 'TURNO_CHAVE'], how='inner')
         if df_res.empty:
-            df_res = pd.merge(
-                df_gat, 
-                df_tec.drop_duplicates('PERCURSO_CHAVE', keep='last'), 
-                left_on='PERCURSO_TXT', 
-                right_on='PERCURSO_CHAVE', 
-                how='inner'
-            )
+            df_res = pd.merge(df_gat, df_tec.drop_duplicates('PERCURSO_CHAVE', keep='last'), left_on='PERCURSO_TXT', right_on='PERCURSO_CHAVE', how='inner')
         
         if not df_res.empty:
+            # --- NOVA MÉTRICA DE DIAS TRABALHADOS EM LASTRAS ---
             d_l = df_res['DATA_LIMPA'].dt.date.nunique()
+            
             st.markdown(f"### 📦 Performance Técnica: Lastras ({mes_sel})")
             
+            # Card de destaque para os dias trabalhados
+            st.info(f"📅 **Atenção:** Foram identificados {d_l} dias com operação efetiva de Lastras neste período.")
+
             df_caix = df_res[df_res['TIPO DE OPERAÇÃO'].fillna('').str.upper().str.contains('CAIXOTE')]
             df_unit = df_res[df_res['TIPO DE OPERAÇÃO'].fillna('').str.upper().str.contains('UNITIZAR')]
             
@@ -170,13 +156,14 @@ with tab2:
             k4.metric("Caixote 160x160", f"{int(df_caix['160 X 160'].sum()):,}".replace(',', '.'))
             k5.metric("Total Acessos", f"{int(df_res['GATILHO'].sum()):,}".replace(',', '.'))
 
-            st.write("**Médias Diárias (Peças/Dia)**")
-            m1, m2, m3, m4 = st.columns(4)
+            st.write("**Médias Reais (Peças / Dias de Operação Lastra)**")
+            m1, m2, m3, m4, m5 = st.columns(5)
             if d_l > 0:
                 m1.metric("Média Unit. 120x270", f"{(df_unit['120X270'].sum()/d_l):.1f}".replace('.', ','))
                 m2.metric("Média Unit. 160x160", f"{(df_unit['160 X 160'].sum()/d_l):.1f}".replace('.', ','))
                 m3.metric("Média Caix. 120x270", f"{(df_caix['120X270'].sum()/d_l):.1f}".replace('.', ','))
                 m4.metric("Média Caix. 160x160", f"{(df_caix['160 X 160'].sum()/d_l):.1f}".replace('.', ','))
+                m5.metric("Dias Trabalhados", d_l) # Métrica adicional visual
 
             st.divider()
             df_ev_l = df_res.groupby([df_res['DATA_LIMPA'].dt.date, 'TIPO DE OPERAÇÃO'])[['120X270', '160 X 160']].sum().reset_index().melt(id_vars=['DATA_LIMPA', 'TIPO DE OPERAÇÃO'])
@@ -191,4 +178,4 @@ with tab2:
             tabela_final.rename(columns={'GATILHO': 'TOTAL ACESSOS'}, inplace=True)
             st.table(tabela_final.style.format({'120X270': '{:,.0f}', '160 X 160': '{:,.0f}', 'PC': '{:,.0f}', 'TOTAL ACESSOS': '{:,.0f}'}))
         else:
-            st.warning("⚠️ Percursos não encontrados na aba LASTRAS. Verifique se os códigos de percurso estão corretos.")
+            st.warning("⚠️ Percursos não encontrados na aba LASTRAS técnica.")
