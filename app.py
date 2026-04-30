@@ -62,7 +62,6 @@ def carregar_dados():
     df_tec['DATA_SEQ'] = pd.to_datetime(df_tec['DATA SEQUENCIAMENTO'], dayfirst=True, errors='coerce')
     df_tec['PERCURSO_CHAVE'] = df_tec['PERCURSO / ITEM'].astype(str).str.split('.').str[0].str.strip()
     
-    # --- CORREÇÃO DO ERRO .str.split ---
     if 'TURNO' in df_tec.columns:
         df_tec['TURNO_CHAVE'] = df_tec['TURNO'].astype(str).str.split('.').str[0].str.strip()
     else:
@@ -85,30 +84,41 @@ with st.sidebar:
     dia_sel = st.selectbox("Selecione o Dia", ["Todos"] + dias)
     turnos_sel = st.multiselect("Turnos", ["TURNO 1", "TURNO 2", "TURNO 3"], default=["TURNO 1"])
 
-df_f = df_realizado[(df_realizado['MES_ANO'] == mes_sel) & (df_realizado['TURNO_ID'].isin([t.split()[-1] for t in turnos_sel]))]
+ids_t = [t.split()[-1] for t in turnos_sel]
+df_f = df_realizado[(df_realizado['MES_ANO'] == mes_sel) & (df_realizado['TURNO_ID'].isin(ids_t))]
 if dia_sel != "Todos":
     df_f = df_f[df_f['DATA_REF'].dt.strftime('%d/%m/%Y') == dia_sel]
 
 t1, t2, t3 = st.tabs(["🚀 PRODUÇÃO GERAL", "📦 DETALHAMENTO LASTRAS", "🎯 ADERÊNCIA AO PLANO"])
 
-# --- ABA 1 ---
+# --- ABA 1: PRODUÇÃO GERAL ---
 with t1:
     st.markdown(f"## 🚀 Resumo Operacional - {dia_sel if dia_sel != 'Todos' else mes_sel}")
     d_trab = df_f['DATA_REF'].dt.date.nunique()
-    mi_t, me_t = df_f['MI_VAL'].sum(), df_f['ME_VAL'].sum()
+    mi_total_bruto = df_f['MI_VAL'].sum()
+    me_total_bruto = df_f['ME_VAL'].sum()
     res_dia = df_f.groupby(df_f['DATA_REF'].dt.date)[['MI_VAL', 'ME_VAL']].sum().reset_index()
+    
+    # KPIs SUPERIORES
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("🗓️ Dias Trab.", d_trab)
-    c2.metric("MI (Média)", f"{mi_t/d_trab:.1f}" if d_trab > 0 else 0)
-    c3.metric("MI (Mediana)", f"{res_dia['MI_VAL'].median():.1f}" if d_trab > 0 else 0)
-    c4.metric("ME (Média)", f"{me_t/d_trab:.1f}" if d_trab > 0 else 0)
-    c5.metric("ME (Mediana)", f"{res_dia['ME_VAL'].median():.1f}" if d_trab > 0 else 0)
+    c2.metric("Total MI", f"{int(mi_total_bruto)}")
+    c3.metric("MI (Média)", f"{mi_total_bruto/d_trab:.1f}" if d_trab > 0 else 0)
+    c4.metric("Total ME", f"{int(me_total_bruto)}")
+    c5.metric("ME (Média)", f"{me_total_bruto/d_trab:.1f}" if d_trab > 0 else 0)
+    
+    # SEGUNDA LINHA DE KPIs (MEDIANAS)
+    st.write("")
+    m_col1, m_col2, m_col3 = st.columns([1,2,2])
+    m_col2.metric("MI (Mediana)", f"{res_dia['MI_VAL'].median():.1f}" if d_trab > 0 else 0)
+    m_col3.metric("ME (Mediana)", f"{res_dia['ME_VAL'].median():.1f}" if d_trab > 0 else 0)
+    
     st.divider()
     fig = px.line(res_dia, x='DATA_REF', y=['MI_VAL', 'ME_VAL'], markers=True, text='value', title="Evolução Diária de Acessos")
     fig.update_traces(textposition="top center", line=dict(width=3))
     st.plotly_chart(fig, use_container_width=True)
 
-# --- ABA 2 ---
+# --- ABA 2: DETALHAMENTO TÉCNICO ---
 with t2:
     st.markdown("## 📦 Performance Técnica Realizada")
     df_det = pd.merge(df_f[df_f['GATILHO'] > 0], df_tec, left_on=['PERCURSO_LIMP', 'TURNO_ID'], right_on=['PERCURSO_CHAVE', 'TURNO_CHAVE'], how='inner')
@@ -133,30 +143,48 @@ with t2:
         st.divider()
         st.dataframe(df_det[['DATA_REF', 'TURNO_ID', 'PERCURSO_LIMP', 'TIPO DE OPERAÇÃO', 'PC', '120X270', '160 X 160']], use_container_width=True)
 
-# --- ABA 3 ---
+# --- ABA 3: ADERÊNCIA FRAGMENTADA ---
 with t3:
-    st.markdown("## 🎯 Aderência por Tipo de Operação")
-    ids_t = [t.split()[-1] for t in turnos_sel]
+    st.markdown("## 🎯 Aderência Detalhada por Formato")
+    
+    # Filtragem do Plano
     df_plan = df_tec[df_tec['TURNO_CHAVE'].isin(ids_t)]
     if dia_sel != "Todos":
         df_plan = df_plan[df_plan['DATA_SEQ'].dt.strftime('%d/%m/%Y') == dia_sel]
     else:
         df_plan = df_plan[df_plan['DATA_SEQ'].dt.strftime('%m/%Y') == mes_sel]
-    df_match = pd.merge(df_plan, df_f, left_on=['PERCURSO_CHAVE', 'DATA_SEQ', 'TURNO_CHAVE'], right_on=['PERCURSO_LIMP', 'DATA_REF', 'TURNO_ID'], how='left', indicator=True)
-    def render_farol(tipo):
-        sub_p = df_plan[df_plan['TIPO DE OPERAÇÃO'].str.contains(tipo, na=False)]
-        sub_m = df_match[df_match['TIPO DE OPERAÇÃO'].str.contains(tipo, na=False)]
-        p_pc, r_pc = sub_p['PC'].sum(), sub_m[sub_m['_merge'] == 'both']['PC'].sum()
-        ade = (r_pc / p_pc * 100) if p_pc > 0 else 0
-        st.markdown(f"### {tipo}")
-        a1, a2, a3, a4 = st.columns(4)
-        a1.metric("Planejado", f"{int(p_pc)} PC")
-        a2.metric("Atendido", f"{int(r_pc)} PC")
-        a3.metric("Pendente", int(p_pc - r_pc), delta=int(r_pc - p_pc), delta_color="inverse")
-        a4.metric("Aderência %", f"{ade:.1f}%")
-    render_farol("UNITIZAR")
+    
+    # --- NOVO: CONTADOR DE DIAS COM OPERAÇÃO PLANEJADA ---
+    st.markdown("#### 📅 Calendário de Operação Planejada")
+    c_dias = st.columns(len(turnos_sel) if turnos_sel else 1)
+    for i, t_nome in enumerate(turnos_sel):
+        t_id = t_nome.split()[-1]
+        dias_op = df_plan[df_plan['TURNO_CHAVE'] == t_id]['DATA_SEQ'].dt.date.nunique()
+        c_dias[i].metric(f"Dias Planejados {t_nome}", f"{dias_op} d")
     st.write("")
-    render_farol("CAIXOTE")
-    st.divider()
-    st.markdown("#### ⚠️ Pendências Identificadas")
-    st.dataframe(df_match[df_match['_merge'] == 'left_only'][['DATA_SEQ', 'PERCURSO_CHAVE', 'PC', 'TIPO DE OPERAÇÃO']], use_container_width=True)
+
+    df_match = pd.merge(df_plan, df_f, left_on=['PERCURSO_CHAVE', 'DATA_SEQ', 'TURNO_CHAVE'], right_on=['PERCURSO_LIMP', 'DATA_REF', 'TURNO_ID'], how='left', indicator=True)
+
+    def render_aderencia_detalhada(titulo, filtro_tipo):
+        st.markdown(f"### 📋 {titulo}")
+        c_120, c_160 = st.columns(2)
+        formatos = [("120X270", c_120), ("160 X 160", c_160)]
+        for formato, coluna_web in formatos:
+            sub_p = df_plan[(df_plan['TIPO DE OPERAÇÃO'].str.contains(filtro_tipo, na=False)) & (df_plan[formato] > 0)]
+            sub_m = df_match[(df_match['TIPO DE OPERAÇÃO'].str.contains(filtro_tipo, na=False)) & (df_match[formato] > 0)]
+            p_val = sub_p[formato].sum()
+            r_val = sub_m[sub_m['_merge'] == 'both'][formato].sum()
+            ade = (r_val / p_val * 100) if p_val > 0 else 0
+            with coluna_web:
+                st.info(f"**Formato {formato}**")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Plano", f"{int(p_val)} pç")
+                m2.metric("Real", f"{int(r_val)} pç")
+                m3.metric("%", f"{ade:.1f}%")
+        st.write("---")
+
+    render_aderencia_detalhada("UNITIZAÇÃO", "UNITIZAR")
+    render_aderencia_detalhada("CAIXOTES", "CAIXOTE")
+
+    with st.expander("⚠️ Visualizar Pendências Detalhadas"):
+        st.dataframe(df_match[df_match['_merge'] == 'left_only'][['DATA_SEQ', 'PERCURSO_CHAVE', 'TIPO DE OPERAÇÃO', '120X270', '160 X 160']], use_container_width=True)
