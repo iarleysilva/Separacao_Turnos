@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 
 # --- CONFIGURAÇÃO ---
 st.set_page_config(page_title="Gestão Operacional 2026", layout="wide")
@@ -76,44 +77,55 @@ with st.sidebar:
     mes_sel = st.selectbox("Selecione o Mês", meses_disp)
     dias = sorted(df_tec[df_tec['MES_ANO'] == mes_sel]['DATA_SEQ'].dt.strftime('%d/%m/%Y').dropna().unique())
     dia_sel = st.selectbox("Selecione o Dia", ["Todos"] + dias)
-    turnos_sel = st.multiselect("Turnos", ["TURNO 1", "TURNO 2", "TURNO 3"], default=["TURNO 1"])
+    turnos_sel = st.multiselect("Turnos", ["TURNO 1", "TURNO 2", "TURNO 3"], default=["TURNO 1", "TURNO 2", "TURNO 3"])
 
 ids_t = [t.split()[-1] for t in turnos_sel]
 
-# --- MOTOR DE REGRAS (ADERÊNCIA) ---
-df_p_total = df_tec[(df_tec['MES_ANO'] == mes_sel) & (df_tec['TURNO_CHAVE'].isin(ids_t))].copy()
-df_r_total = df_realizado[df_realizado['TURNO_ID'].isin(ids_t)]
+# --- MOTOR DE REGRAS GLOBAL (CORREÇÃO DA PRECISÃO) ---
+# CRÍTICO: O espelho do plano para achar repetidos olha TODO o mês, independente do filtro de turnos da tela
+df_p_global = df_tec[df_tec['MES_ANO'] == mes_sel].copy()
+df_p_global['DATA_SEQ_COMP'] = df_p_global['DATA_SEQ'].dt.date
 
-def julgar_aderencia_final(row):
+peso_turnos = {'3': 1, '1': 2, '2': 3}
+df_p_global['ORDEM_TURNO'] = df_p_global['TURNO_CHAVE'].map(peso_turnos).fillna(99)
+
+def julgar_aderencia_exclusiva_lastras(row):
     percurso = row['PERCURSO_CHAVE']
-    data_p = row['DATA_SEQ']
+    data_p = row['DATA_SEQ_COMP']
     qtd_p = row['PC']
+    ordem_p = row['ORDEM_TURNO']
     
-    duplicados_plano = df_p_total[df_p_total['PERCURSO_CHAVE'] == percurso].sort_values('DATA_SEQ')
+    # Encontra o histórico desse percurso na base global das lastras (vê todos os turnos nos bastidores)
+    duplicados_plano = df_p_global[df_p_global['PERCURSO_CHAVE'] == percurso].sort_values(by=['DATA_SEQ_COMP', 'ORDEM_TURNO'])
     
-    if len(duplicados_plano) > 1:
+    if len(duplicados_plano) == 1:
+        return "REALIZADO", qtd_p
+    else:
         qtds_iguais = duplicados_plano['PC'].nunique() == 1
+        
         if qtds_iguais:
-            ultima_data = duplicados_plano['DATA_SEQ'].max()
-            if data_p < ultima_data:
+            ultima_linha = duplicados_plano.iloc[-1]
+            ultima_data = ultima_linha['DATA_SEQ_COMP']
+            ultima_ordem = ultima_linha['ORDEM_TURNO']
+            
+            # Se a linha atual está antes do último destino real do fluxo, leva penalidade
+            if data_p < ultima_data or (data_p == ultima_data and ordem_p < ultima_ordem):
                 return "PENALIDADE (REPETIDO)", 0
             else:
-                fez = df_r_total[(df_r_total['PERCURSO_LIMP'] == percurso) & (df_r_total['GATILHO'] > 0)]
-                return "REALIZADO", qtd_p if not fez.empty else 0
+                return "REALIZADO", qtd_p
         else:
-            fez_no_dia = df_r_total[(df_r_total['PERCURSO_LIMP'] == percurso) & (df_r_total['DATA_REF'].dt.date == data_p.date())]
-            return "REALIZADO (PARCIAL)", qtd_p if not fez_no_dia.empty else 0
-    else:
-        fez = df_r_total[df_r_total['PERCURSO_LIMP'] == percurso]
-        return "REALIZADO", qtd_p if not fez.empty else 0
+            return "REALIZADO (PARCIAL)", qtd_p
 
-# --- PROCESSAMENTO ---
-if df_p_total.empty:
-    st.info("📌 Sem dados planejados para este período.")
+# Aplica o julgamento na base do mês completo
+df_p_global[['STATUS_FINAL', 'VALOR_VALIDO']] = df_p_global.apply(julgar_aderencia_exclusiva_lastras, axis=1, result_type='expand')
+
+# --- FILTRAGEM VISUAL EXECUTIVA ---
+# Agora sim aplicamos o filtro de Turnos selecionados na tela para gerar os blocos e tabelas
+df_view_total = df_p_global[df_p_global['TURNO_CHAVE'].isin(ids_t)].copy()
+
+if df_view_total.empty:
+    st.info("📌 Sem dados planejados para o filtro selecionado.")
     st.stop()
-
-df_view_total = df_p_total.copy()
-df_view_total[['STATUS_FINAL', 'VALOR_VALIDO']] = df_view_total.apply(julgar_aderencia_final, axis=1, result_type='expand')
 
 if dia_sel != "Todos":
     df_view = df_view_total[df_view_total['DATA_SEQ'].dt.strftime('%d/%m/%Y') == dia_sel].copy()
@@ -122,7 +134,7 @@ else:
 
 t1, t3 = st.tabs(["🚀 PRODUÇÃO GERAL", "🎯 ADERÊNCIA AO PLANO"])
 
-# --- ABA 1: PRODUÇÃO GERAL (COM VALORES NO GRÁFICO) ---
+# --- ABA 1: PRODUÇÃO GERAL ---
 with t1:
     st.markdown(f"## 🚀 Resumo Operacional - {dia_sel if dia_sel != 'Todos' else mes_sel}")
     
@@ -138,6 +150,15 @@ with t1:
     mi_total = df_f_real['MI_VAL'].sum()
     me_total = df_f_real['ME_VAL'].sum()
     
+    if not df_f_real.empty:
+        res_dia = df_f_real.groupby(df_f_real['DATA_REF'].dt.date)[['MI_VAL', 'ME_VAL']].sum().reset_index()
+        mediana_mi = res_dia['MI_VAL'].median()
+        mediana_me = res_dia['ME_VAL'].median()
+    else:
+        res_dia = pd.DataFrame()
+        mediana_mi = 0
+        mediana_me = 0
+
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("🗓️ Dias Trab.", d_trab if d_trab > 0 else 0)
     c2.metric("Total MI", f"{int(mi_total)}")
@@ -145,11 +166,13 @@ with t1:
     c4.metric("Total ME", f"{int(me_total)}")
     c5.metric("ME (Média)", f"{me_total/d_trab:.1f}" if d_trab > 0 else 0)
     
+    st.write("")
+    cx1, cx2, cx3, cx4 = st.columns([1, 2, 2, 1])
+    cx2.metric("📊 MI (Mediana)", f"{mediana_mi:.1f}")
+    cx3.metric("📊 ME (Mediana)", f"{mediana_me:.1f}")
+    
     st.divider()
-    if not df_f_real.empty:
-        res_dia = df_f_real.groupby(df_f_real['DATA_REF'].dt.date)[['MI_VAL', 'ME_VAL']].sum().reset_index()
-        
-        # Melt para facilitar o uso do parâmetro text do Plotly
+    if not res_dia.empty:
         res_dia_melt = res_dia.melt(id_vars='DATA_REF', var_name='Tipo', value_name='Acessos')
         
         fig = px.line(res_dia_melt, 
@@ -157,18 +180,38 @@ with t1:
                      y='Acessos', 
                      color='Tipo',
                      markers=True, 
-                     text='Acessos', # Adiciona o valor aqui
+                     text='Acessos',
                      title="Evolução Diária de Acessos",
                      color_discrete_map={"MI_VAL": "#00CC96", "ME_VAL": "#636EFA"})
         
-        # Configuração para o texto aparecer acima do ponto e formatado
         fig.update_traces(textposition="top center", texttemplate='%{text:.0f}')
+        
+        fig.add_trace(go.Scatter(
+            x=res_dia['DATA_REF'], y=[mediana_mi]*len(res_dia),
+            mode='lines', name='Mediana MI (Clique p/ ver)',
+            line=dict(color='#00CC96', dash='dash', width=2),
+            visible="legendonly"
+        ))
+        fig.add_trace(go.Scatter(
+            x=res_dia['DATA_REF'], y=[mediana_me]*len(res_dia),
+            mode='lines', name='Mediana ME (Clique p/ ver)',
+            line=dict(color='#636EFA', dash='dash', width=2),
+            visible="legendonly"
+        ))
         
         st.plotly_chart(fig, use_container_width=True)
 
 # --- ABA 3: ADERÊNCIA AO PLANO ---
 with t3:
     st.markdown(f"## 🎯 Aderência Operacional - {dia_sel}")
+    
+    st.markdown("#### 📅 Dias Planejados por Turno no Período")
+    c_dias = st.columns(len(turnos_sel) if turnos_sel else 1)
+    for index, t_nome in enumerate(turnos_sel):
+        t_id = t_nome.split()[-1]
+        dias_op = df_view_total[df_view_total['TURNO_CHAVE'] == t_id]['DATA_SEQ_COMP'].nunique()
+        c_dias[index].metric(f"⏱️ {t_nome}", f"{dias_op} dias")
+    st.write("---")
     
     def render_secao(titulo, filtro):
         st.markdown(f"### {titulo}")
@@ -194,6 +237,6 @@ with t3:
 
     aba_ok, aba_bad = st.tabs(["✅ ADERIDOS", "⚠️ PENDÊNCIAS / REPETIÇÕES"])
     with aba_ok:
-        st.dataframe(df_view[df_view['STATUS_FINAL'].str.contains("REALIZADO")][['DATA_SEQ', 'PERCURSO_CHAVE', 'TIPO DE OPERAÇÃO', 'PC', 'STATUS_FINAL']], use_container_width=True)
+        st.dataframe(df_view[df_view['STATUS_FINAL'].str.contains("REALIZADO")][['DATA_SEQ', 'TURNO_CHAVE', 'PERCURSO_CHAVE', 'TIPO DE OPERAÇÃO', 'PC', 'STATUS_FINAL']], use_container_width=True)
     with aba_bad:
-        st.dataframe(df_view[~df_view['STATUS_FINAL'].str.contains("REALIZADO")][['DATA_SEQ', 'PERCURSO_CHAVE', 'TIPO DE OPERAÇÃO', 'PC', 'STATUS_FINAL']], use_container_width=True)
+        st.dataframe(df_view[~df_view['STATUS_FINAL'].str.contains("REALIZADO")][['DATA_SEQ', 'TURNO_CHAVE', 'PERCURSO_CHAVE', 'TIPO DE OPERAÇÃO', 'PC', 'STATUS_FINAL']], use_container_width=True)
